@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Transfer Configuration User</label>
+    <description>Grants tellers access to create, view, and edit fund transfer requests via the Transfer Configuration component.</description>
+
+    <!-- Custom object access -->
+    <objectPermissions>
+        <object>Fund_Transfer_Request__c</object>
+        <allowCreate>true</allowCreate>
+        <allowDelete>true</allowDelete>
+        <allowEdit>true</allowEdit>
+        <allowRead>true</allowRead>
+        <modifyAllRecords>false</modifyAllRecords>
+        <viewAllRecords>false</viewAllRecords>
+    </objectPermissions>
+
+    <!-- Field access -->
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.Case__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.From_Account__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.To_Account__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.Amount__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.Start_Date__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.Status__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Fund_Transfer_Request__c.Transfer_Type__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+
+    <!-- Apex controller access -->
+    <classAccesses>
+        <apexClass>TransferConfigurationController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+</PermissionSet>

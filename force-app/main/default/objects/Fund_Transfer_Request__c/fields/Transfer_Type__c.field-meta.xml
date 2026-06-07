@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Transfer_Type__c</fullName>
+    <label>Transfer Type</label>
+    <type>Picklist</type>
+    <valueSet>
+        <restricted>false</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>1:1</fullName>
+                <default>false</default>
+                <label>1:1</label>
+            </value>
+            <value>
+                <fullName>1:N</fullName>
+                <default>false</default>
+                <label>1:N</label>
+            </value>
+            <value>
+                <fullName>N:1</fullName>
+                <default>false</default>
+                <label>N:1</label>
+            </value>
+            <value>
+                <fullName>N:N</fullName>
+                <default>false</default>
+                <label>N:N</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

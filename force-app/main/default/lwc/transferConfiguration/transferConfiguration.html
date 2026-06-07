@@ -1,0 +1,306 @@
+<template>
+    <lightning-card title="Transfer Requests">
+        <div class="slds-var-p-around_medium">
+
+            <template lwc:if={error}>
+                <div class="slds-notify slds-notify_alert slds-theme_error slds-var-m-bottom_small" role="alert">
+                    {error}
+                </div>
+            </template>
+
+            <!-- ── FORM MODE ── -->
+            <template lwc:if={isFormMode}>
+
+                <!-- Transfer Date -->
+                <div class="slds-var-m-bottom_medium">
+                    <lightning-input
+                        type="date"
+                        label="Transfer Date"
+                        value={transferDate}
+                        onchange={handleTransferDateChange}
+                        required
+                    ></lightning-input>
+                </div>
+
+                <!-- Two-column account pickers -->
+                <div class="slds-grid slds-gutters">
+
+                    <!-- Source column -->
+                    <div class="slds-col slds-size_1-of-2">
+                        <p class="slds-text-heading_small slds-var-m-bottom_x-small">Source Accounts</p>
+
+                        <lightning-combobox
+                            label="Add source account"
+                            placeholder="Select account to add..."
+                            options={availableOptions}
+                            value={sourceComboboxValue}
+                            onchange={handleAddSource}
+                        ></lightning-combobox>
+
+                        <!-- Selected source rows -->
+                        <template for:each={sourceSelected} for:item="row">
+                            <div key={row._key} class="slds-box slds-box_x-small slds-var-m-top_x-small">
+                                <div class="slds-grid slds-grid_vertical-align-center slds-gutters_x-small">
+                                    <!-- Account info -->
+                                    <div class="slds-col">
+                                        <p class="slds-text-body_regular slds-truncate" title={row.name}>{row.name}</p>
+                                        <p class="slds-text-body_small slds-text-color_weak">
+                                            ****{row.lastFour}
+                                            <template lwc:if={row.balance}>
+                                                &nbsp;·&nbsp;Bal:&nbsp;<lightning-formatted-number
+                                                    value={row.balance}
+                                                    format-style="currency"
+                                                    currency-code="USD"
+                                                    maximum-fraction-digits="0"
+                                                ></lightning-formatted-number>
+                                            </template>
+                                        </p>
+                                    </div>
+                                    <!-- Amount input -->
+                                    <div class="slds-col slds-size_2-of-5">
+                                        <lightning-input
+                                            type="number"
+                                            label="Amount"
+                                            value={row.amount}
+                                            formatter="currency"
+                                            step="0.01"
+                                            data-key={row._key}
+                                            data-side="source"
+                                            onchange={handleAmountChange}
+                                        ></lightning-input>
+                                    </div>
+                                    <!-- Remove -->
+                                    <div class="slds-col slds-grow-none">
+                                        <lightning-button-icon
+                                            icon-name="utility:delete"
+                                            variant="bare"
+                                            size="small"
+                                            alternative-text="Remove account"
+                                            title="Remove account"
+                                            data-key={row._key}
+                                            data-side="source"
+                                            onclick={handleRemoveAccount}
+                                        ></lightning-button-icon>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Source total -->
+                        <template lwc:if={hasSourceAccounts}>
+                            <div class="slds-var-m-top_small slds-border_top slds-var-p-top_x-small slds-grid slds-grid_align-spread">
+                                <span class="slds-text-body_small slds-text-color_weak">Total</span>
+                                <lightning-formatted-number
+                                    value={sourceTotal}
+                                    format-style="currency"
+                                    currency-code="USD"
+                                ></lightning-formatted-number>
+                            </div>
+                        </template>
+                    </div>
+
+                    <!-- Destination column -->
+                    <div class="slds-col slds-size_1-of-2">
+                        <p class="slds-text-heading_small slds-var-m-bottom_x-small">Destination Accounts</p>
+
+                        <lightning-combobox
+                            label="Add destination account"
+                            placeholder="Select account to add..."
+                            options={availableOptions}
+                            value={destComboboxValue}
+                            onchange={handleAddDestination}
+                        ></lightning-combobox>
+
+                        <!-- Selected destination rows -->
+                        <template for:each={destinationSelected} for:item="row">
+                            <div key={row._key} class="slds-box slds-box_x-small slds-var-m-top_x-small">
+                                <div class="slds-grid slds-grid_vertical-align-center slds-gutters_x-small">
+                                    <!-- Account info -->
+                                    <div class="slds-col">
+                                        <p class="slds-text-body_regular slds-truncate" title={row.name}>{row.name}</p>
+                                        <p class="slds-text-body_small slds-text-color_weak">
+                                            ****{row.lastFour}
+                                            <template lwc:if={row.balance}>
+                                                &nbsp;·&nbsp;Bal:&nbsp;<lightning-formatted-number
+                                                    value={row.balance}
+                                                    format-style="currency"
+                                                    currency-code="USD"
+                                                    maximum-fraction-digits="0"
+                                                ></lightning-formatted-number>
+                                            </template>
+                                        </p>
+                                    </div>
+                                    <!-- Amount input -->
+                                    <div class="slds-col slds-size_2-of-5">
+                                        <lightning-input
+                                            type="number"
+                                            label="Amount"
+                                            value={row.amount}
+                                            formatter="currency"
+                                            step="0.01"
+                                            data-key={row._key}
+                                            data-side="destination"
+                                            onchange={handleAmountChange}
+                                        ></lightning-input>
+                                    </div>
+                                    <!-- Remove -->
+                                    <div class="slds-col slds-grow-none">
+                                        <lightning-button-icon
+                                            icon-name="utility:delete"
+                                            variant="bare"
+                                            size="small"
+                                            alternative-text="Remove account"
+                                            title="Remove account"
+                                            data-key={row._key}
+                                            data-side="destination"
+                                            onclick={handleRemoveAccount}
+                                        ></lightning-button-icon>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Destination total -->
+                        <template lwc:if={hasDestinationAccounts}>
+                            <div class="slds-var-m-top_small slds-border_top slds-var-p-top_x-small slds-grid slds-grid_align-spread">
+                                <span class="slds-text-body_small slds-text-color_weak">Total</span>
+                                <lightning-formatted-number
+                                    value={destinationTotal}
+                                    format-style="currency"
+                                    currency-code="USD"
+                                ></lightning-formatted-number>
+                            </div>
+                        </template>
+                    </div>
+
+                </div>
+
+                <!-- Total mismatch warning -->
+                <template lwc:if={hasTotalMismatch}>
+                    <p class="slds-text-color_error slds-var-m-top_x-small">
+                        Source and destination totals do not match.
+                    </p>
+                </template>
+
+                <!-- Form actions -->
+                <div class="slds-button-group slds-var-m-top_medium">
+                    <lightning-button
+                        label="Save as Draft"
+                        onclick={handleSaveDraft}
+                        disabled={isLoading}
+                    ></lightning-button>
+                    <lightning-button
+                        label="Submit"
+                        variant="brand"
+                        onclick={handleSubmit}
+                        disabled={isLoading}
+                    ></lightning-button>
+                    <lightning-button
+                        label="Cancel"
+                        onclick={handleCancel}
+                        disabled={isLoading}
+                    ></lightning-button>
+                </div>
+
+            </template>
+
+            <!-- ── LIST MODE ── -->
+            <template lwc:else>
+
+                <template lwc:if={hasTransferSummary}>
+
+                    <!-- Transfer date and status -->
+                    <div class="slds-grid slds-gutters slds-var-m-bottom_medium">
+                        <div class="slds-col slds-size_1-of-2">
+                            <p class="slds-text-body_small slds-text-color_weak">Transfer Date</p>
+                            <p class="slds-text-heading_small">
+                                <lightning-formatted-date-time
+                                    value={summary.transferDate}
+                                    year="numeric"
+                                    month="long"
+                                    day="2-digit"
+                                ></lightning-formatted-date-time>
+                            </p>
+                        </div>
+                        <div class="slds-col slds-size_1-of-2">
+                            <p class="slds-text-body_small slds-text-color_weak">Status</p>
+                            <lightning-badge label={summary.status}></lightning-badge>
+                        </div>
+                    </div>
+
+                    <!-- Source / Destination two-column summary -->
+                    <div class="slds-grid slds-gutters slds-var-m-bottom_medium">
+
+                        <div class="slds-col slds-size_1-of-2">
+                            <p class="slds-text-heading_small slds-var-m-bottom_x-small">Source Accounts</p>
+                            <template for:each={summary.sources} for:item="line">
+                                <div key={line.recordId} class="slds-grid slds-grid_align-spread slds-var-m-bottom_x-small">
+                                    <span>{line.displayLabel}</span>
+                                    <lightning-formatted-number
+                                        value={line.amount}
+                                        format-style="currency"
+                                        currency-code="USD"
+                                    ></lightning-formatted-number>
+                                </div>
+                            </template>
+                        </div>
+
+                        <div class="slds-col slds-size_1-of-2">
+                            <p class="slds-text-heading_small slds-var-m-bottom_x-small">Destination Accounts</p>
+                            <template for:each={summary.destinations} for:item="line">
+                                <div key={line.recordId} class="slds-grid slds-grid_align-spread slds-var-m-bottom_x-small">
+                                    <span>{line.displayLabel}</span>
+                                    <lightning-formatted-number
+                                        value={line.amount}
+                                        format-style="currency"
+                                        currency-code="USD"
+                                    ></lightning-formatted-number>
+                                </div>
+                            </template>
+                        </div>
+
+                    </div>
+
+                    <!-- List actions -->
+                    <div class="slds-button-group">
+                        <lightning-button
+                            label="Edit"
+                            onclick={handleEdit}
+                            disabled={isLoading}
+                        ></lightning-button>
+                        <lightning-button
+                            label="Reset"
+                            variant="destructive"
+                            onclick={handleReset}
+                            disabled={isLoading}
+                        ></lightning-button>
+                    </div>
+
+                </template>
+
+                <!-- Empty state -->
+                <template lwc:else>
+                    <div class="slds-align_absolute-center slds-var-p-around_large">
+                        <div class="slds-text-align_center">
+                            <lightning-icon
+                                icon-name="standard:orders"
+                                size="large"
+                                class="slds-var-m-bottom_small"
+                            ></lightning-icon>
+                            <p class="slds-text-body_regular slds-var-m-bottom_medium">
+                                Specify the transfer request here
+                            </p>
+                            <lightning-button
+                                label="New Transfer Request"
+                                variant="brand"
+                                onclick={handleNew}
+                            ></lightning-button>
+                        </div>
+                    </div>
+                </template>
+
+            </template>
+
+        </div>
+    </lightning-card>
+</template>
