@@ -58,16 +58,29 @@
                                     </div>
                                     <!-- Amount input -->
                                     <div class="slds-col slds-size_2-of-5">
-                                        <lightning-input
-                                            type="number"
-                                            label="Amount"
-                                            value={row.amount}
-                                            formatter="currency"
-                                            step="0.01"
-                                            data-key={row._key}
-                                            data-side="source"
-                                            onchange={handleAmountChange}
-                                        ></lightning-input>
+                                        <template lwc:if={sourceAmountEditable}>
+                                            <lightning-input
+                                                type="number"
+                                                label="Amount"
+                                                value={row.amount}
+                                                formatter="currency"
+                                                step="0.01"
+                                                data-key={row._key}
+                                                data-side="source"
+                                                onchange={handleAmountChange}
+                                            ></lightning-input>
+                                        </template>
+                                        <template lwc:else>
+                                            <p class="slds-text-body_small slds-text-color_weak">Amount</p>
+                                            <p class="slds-text-body_regular">
+                                                <lightning-formatted-number
+                                                    value={sourceTotal}
+                                                    format-style="currency"
+                                                    currency-code="USD"
+                                                ></lightning-formatted-number>
+                                            </p>
+                                            <p class="slds-text-body_small slds-text-color_weak">Derived from destination total</p>
+                                        </template>
                                     </div>
                                     <!-- Remove -->
                                     <div class="slds-col slds-grow-none">
@@ -103,13 +116,32 @@
                     <div class="slds-col slds-size_1-of-2">
                         <p class="slds-text-heading_small slds-var-m-bottom_x-small">Destination Accounts</p>
 
-                        <lightning-combobox
-                            label="Add destination account"
-                            placeholder="Select account to add..."
-                            options={availableOptions}
-                            value={destComboboxValue}
-                            onchange={handleAddDestination}
-                        ></lightning-combobox>
+                        <lightning-input
+                            type="search"
+                            label="Search destination account"
+                            placeholder="Search by account name or number..."
+                            value={destSearchTerm}
+                            onchange={handleDestSearchTermChange}
+                        ></lightning-input>
+
+                        <template lwc:if={hasDestSearchResults}>
+                            <ul class="slds-listbox slds-listbox_vertical slds-box slds-box_x-small slds-var-m-top_xx-small" role="listbox">
+                                <template for:each={destSearchResults} for:item="result">
+                                    <li key={result.id} class="slds-listbox__item" role="presentation">
+                                        <div
+                                            class="slds-media slds-listbox__option slds-listbox__option_plain slds-media_small"
+                                            role="option"
+                                            data-id={result.id}
+                                            onclick={handleSelectDestSearchResult}
+                                        >
+                                            <span class="slds-media__body">
+                                                <span class="slds-truncate">{result.displayLabel}</span>
+                                            </span>
+                                        </div>
+                                    </li>
+                                </template>
+                            </ul>
+                        </template>
 
                         <!-- Selected destination rows -->
                         <template for:each={destinationSelected} for:item="row">
@@ -132,16 +164,29 @@
                                     </div>
                                     <!-- Amount input -->
                                     <div class="slds-col slds-size_2-of-5">
-                                        <lightning-input
-                                            type="number"
-                                            label="Amount"
-                                            value={row.amount}
-                                            formatter="currency"
-                                            step="0.01"
-                                            data-key={row._key}
-                                            data-side="destination"
-                                            onchange={handleAmountChange}
-                                        ></lightning-input>
+                                        <template lwc:if={destinationAmountEditable}>
+                                            <lightning-input
+                                                type="number"
+                                                label="Amount"
+                                                value={row.amount}
+                                                formatter="currency"
+                                                step="0.01"
+                                                data-key={row._key}
+                                                data-side="destination"
+                                                onchange={handleAmountChange}
+                                            ></lightning-input>
+                                        </template>
+                                        <template lwc:else>
+                                            <p class="slds-text-body_small slds-text-color_weak">Amount</p>
+                                            <p class="slds-text-body_regular">
+                                                <lightning-formatted-number
+                                                    value={destinationTotal}
+                                                    format-style="currency"
+                                                    currency-code="USD"
+                                                ></lightning-formatted-number>
+                                            </p>
+                                            <p class="slds-text-body_small slds-text-color_weak">Derived from source total</p>
+                                        </template>
                                     </div>
                                     <!-- Remove -->
                                     <div class="slds-col slds-grow-none">

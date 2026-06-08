@@ -109,6 +109,45 @@ public with sharing class TransferConfigurationController {
         return result;
     }
 
+    // ── searchFinancialAccounts ────────────────────────────────────────────────
+    // Ad-hoc lookup for destination accounts that the customer doesn't own
+    // (e.g. paying a third party). Requires a minimum search length and caps
+    // results so we never expose a browsable list of other customers' accounts.
+
+    private static final Integer SEARCH_MIN_LENGTH = 4;
+    private static final Integer SEARCH_RESULT_LIMIT = 20;
+
+    @AuraEnabled(cacheable=true)
+    public static List<FinancialAccountInfo> searchFinancialAccounts(String searchTerm) {
+        String term = searchTerm == null ? '' : searchTerm.trim();
+        if (term.length() < SEARCH_MIN_LENGTH) {
+            return new List<FinancialAccountInfo>();
+        }
+
+        String likeTerm = '%' + String.escapeSingleQuotes(term) + '%';
+        List<FinancialAccount> accounts = [
+            SELECT Id, Name, Type, FinancialAccountNumber, Status
+            FROM FinancialAccount
+            WHERE Status = 'Active'
+              AND (Name LIKE :likeTerm OR FinancialAccountNumber LIKE :likeTerm)
+            ORDER BY Name ASC
+            LIMIT :SEARCH_RESULT_LIMIT
+        ];
+
+        // Balance is intentionally omitted — these may not be the customer's own accounts.
+        List<FinancialAccountInfo> result = new List<FinancialAccountInfo>();
+        for (FinancialAccount fa : accounts) {
+            FinancialAccountInfo info = new FinancialAccountInfo();
+            info.id = fa.Id;
+            info.name = fa.Name;
+            info.type = fa.Type;
+            info.financialAccountNumber = fa.FinancialAccountNumber;
+            info.status = fa.Status;
+            result.add(info);
+        }
+        return result;
+    }
+
     // ── getTransferSummary ─────────────────────────────────────────────────────
 
     @AuraEnabled(cacheable=true)

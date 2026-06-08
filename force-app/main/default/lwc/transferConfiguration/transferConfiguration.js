@@ -5,6 +5,7 @@ import { refreshApex } from '@salesforce/apex';
 import LightningConfirm from 'lightning/confirm';
 import CASE_ACCOUNT_ID from '@salesforce/schema/Case.AccountId';
 import getFinancialAccounts from '@salesforce/apex/TransferConfigurationController.getFinancialAccounts';
+import searchFinancialAccounts from '@salesforce/apex/TransferConfigurationController.searchFinancialAccounts';
 import getTransferSummary from '@salesforce/apex/TransferConfigurationController.getTransferSummary';
 import saveTransferRequests from '@salesforce/apex/TransferConfigurationController.saveTransferRequests';
 import deleteTransferRequests from '@salesforce/apex/TransferConfigurationController.deleteTransferRequests';
@@ -22,9 +23,13 @@ export default class TransferConfiguration extends LightningElement {
     @track isLoading = false;
     @track error;
 
+    @track destSearchTerm = '';
+    @track _destSearchRawResults = [];
+    isSearchingDest = false;
+
     sourceComboboxValue = '';
-    destComboboxValue = '';
     _keyCounter = 0;
+    _destSearchTimeout;
 
     @wire(getRecord, { recordId: '$recordId', fields: CASE_FIELDS })
     wiredCase;
@@ -83,6 +88,25 @@ export default class TransferConfiguration extends LightningElement {
             .map((fa) => ({ label: this._formatAccountLabel(fa), value: fa.id }));
     }
 
+    // Search results with anything already selected on either side filtered out,
+    // so an account can't be picked twice or used as both a source and a destination.
+    get destSearchResults() {
+        const excludedIds = new Set([
+            ...this.sourceSelected.map((r) => r.id),
+            ...this.destinationSelected.map((r) => r.id)
+        ]);
+        return this._destSearchRawResults
+            .filter((fa) => !excludedIds.has(fa.id))
+            .map((fa) => ({
+                id: fa.id,
+                displayLabel: `${fa.name} • ****${fa.financialAccountNumber?.slice(-4) ?? '????'}`
+            }));
+    }
+
+    get hasDestSearchResults() {
+        return this.destSearchResults.length > 0;
+    }
+
     get hasSourceAccounts() {
         return this.sourceSelected.length > 0;
     }
@@ -91,11 +115,40 @@ export default class TransferConfiguration extends LightningElement {
         return this.destinationSelected.length > 0;
     }
 
+    // Amount is only meaningfully entered on one side for 1:1, N:1 and 1:N —
+    // the other side's single account always carries the matching total, so we
+    // derive it instead of asking the user to re-key (and possibly mismatch) it.
+    // N:N is the only shape where both sides need independent amounts.
+    //
+    // The shape is ambiguous while either side is still empty (e.g. one source
+    // and zero destinations could become 1:1 or 1:N), so both sides stay
+    // editable until there's at least one account on each — only then do we
+    // know which side's total to derive.
+    get _shapeIsResolved() {
+        return this.sourceSelected.length > 0 && this.destinationSelected.length > 0;
+    }
+
+    get sourceAmountEditable() {
+        if (!this._shapeIsResolved) return true;
+        return !(this.sourceSelected.length === 1 && this.destinationSelected.length > 1);
+    }
+
+    get destinationAmountEditable() {
+        if (!this._shapeIsResolved) return true;
+        return this.destinationSelected.length > 1;
+    }
+
     get sourceTotal() {
+        if (!this.sourceAmountEditable) {
+            return this.destinationTotal;
+        }
         return this.sourceSelected.reduce((sum, r) => sum + this._parseAmount(r.amount), 0);
     }
 
     get destinationTotal() {
+        if (!this.destinationAmountEditable) {
+            return this.sourceTotal;
+        }
         return this.destinationSelected.reduce((sum, r) => sum + this._parseAmount(r.amount), 0);
     }
 
@@ -173,13 +226,39 @@ export default class TransferConfiguration extends LightningElement {
         this.sourceComboboxValue = '';
     }
 
-    handleAddDestination(event) {
-        const id = event.detail.value;
-        if (!id) return;
-        const fa = this.financialAccounts.find((a) => a.id === id);
+    handleDestSearchTermChange(event) {
+        this.destSearchTerm = event.detail.value;
+        window.clearTimeout(this._destSearchTimeout);
+        this._destSearchTimeout = window.setTimeout(() => this._runDestSearch(), 300);
+    }
+
+    handleSelectDestSearchResult(event) {
+        const id = event.currentTarget.dataset.id;
+        const fa = this._destSearchRawResults.find((r) => r.id === id);
         if (!fa) return;
         this.destinationSelected = [...this.destinationSelected, this._makeRow(fa)];
-        this.destComboboxValue = '';
+        this.destSearchTerm = '';
+        this._destSearchRawResults = [];
+    }
+
+    _runDestSearch() {
+        const term = this.destSearchTerm?.trim();
+        if (!term || term.length < 4) {
+            this._destSearchRawResults = [];
+            return;
+        }
+
+        this.isSearchingDest = true;
+        searchFinancialAccounts({ searchTerm: term })
+            .then((results) => {
+                this._destSearchRawResults = results;
+            })
+            .catch((e) => {
+                this.error = this._extractError(e);
+            })
+            .finally(() => {
+                this.isSearchingDest = false;
+            });
     }
 
     handleAmountChange(event) {
@@ -260,7 +339,8 @@ export default class TransferConfiguration extends LightningElement {
         this.destinationSelected = [];
         this.transferDate = null;
         this.sourceComboboxValue = '';
-        this.destComboboxValue = '';
+        this.destSearchTerm = '';
+        this._destSearchRawResults = [];
         this.error = null;
     }
 
@@ -283,11 +363,11 @@ export default class TransferConfiguration extends LightningElement {
                     status,
                     sourceRows: this.sourceSelected.map((r) => ({
                         financialAccountId: r.id,
-                        amount: this._parseAmount(r.amount)
+                        amount: this._effectiveSourceAmount(r)
                     })),
                     destinationRows: this.destinationSelected.map((r) => ({
                         financialAccountId: r.id,
-                        amount: this._parseAmount(r.amount)
+                        amount: this._effectiveDestinationAmount(r)
                     }))
                 })
             });
@@ -312,6 +392,15 @@ export default class TransferConfiguration extends LightningElement {
     _parseAmount(value) {
         const n = parseFloat(String(value ?? '').replace(/[^0-9.]/g, ''));
         return isFinite(n) ? n : 0;
+    }
+
+    // The non-editable side has exactly one row, whose amount is the matching total.
+    _effectiveSourceAmount(row) {
+        return this.sourceAmountEditable ? this._parseAmount(row.amount) : this.sourceTotal;
+    }
+
+    _effectiveDestinationAmount(row) {
+        return this.destinationAmountEditable ? this._parseAmount(row.amount) : this.destinationTotal;
     }
 
     _extractError(e) {
@@ -346,8 +435,12 @@ export default class TransferConfiguration extends LightningElement {
             return false;
         }
 
-        const sourceIncomplete = this.sourceSelected.some((r) => this._parseAmount(r.amount) <= 0);
-        const destinationIncomplete = this.destinationSelected.some((r) => this._parseAmount(r.amount) <= 0);
+        const sourceIncomplete = this.sourceAmountEditable
+            ? this.sourceSelected.some((r) => this._parseAmount(r.amount) <= 0)
+            : this.sourceTotal <= 0;
+        const destinationIncomplete = this.destinationAmountEditable
+            ? this.destinationSelected.some((r) => this._parseAmount(r.amount) <= 0)
+            : this.destinationTotal <= 0;
         if (sourceIncomplete || destinationIncomplete) {
             this.error = 'All amount fields must be greater than zero.';
             return false;
@@ -355,10 +448,11 @@ export default class TransferConfiguration extends LightningElement {
 
         if (isSubmit) {
             for (const row of this.sourceSelected) {
-                if (row.balance != null && this._parseAmount(row.amount) > row.balance) {
+                const requested = this._effectiveSourceAmount(row);
+                if (row.balance != null && requested > row.balance) {
                     const fmt = (n) =>
                         new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-                    this.error = `Account ****${row.lastFour} has ${fmt(row.balance)} available but ${fmt(this._parseAmount(row.amount))} requested.`;
+                    this.error = `Account ****${row.lastFour} has ${fmt(row.balance)} available but ${fmt(requested)} requested.`;
                     return false;
                 }
             }
