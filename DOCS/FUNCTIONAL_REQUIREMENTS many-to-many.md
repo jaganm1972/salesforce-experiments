@@ -1,15 +1,15 @@
 # Functional Requirements: Multi-Account Transfer System
 **Salesforce Case-Based Transfer Management for HNW Customers**
 
-**Document Version:** 2.0
-**Date:** June 7, 2026
-**Status:** Updated to reflect implemented solution
+**Document Version:** 3.0
+**Date:** June 10, 2026
+**Status:** Updated to reflect row-based 1:1 model with external account support
 
 ---
 
 ## 1. EXECUTIVE SUMMARY
 
-This document outlines the functional requirements for a **Multi-Account Transfer System** integrated into Salesforce. The system enables bank tellers to capture and manage transfer instructions for high-net-worth (HNW) customers across multiple account combinations (1:1, 1:N, N:1, N:N). The system validates balances and stores transfer configurations in Salesforce for further processing.
+This document outlines the functional requirements for a **Multi-Account Transfer System** integrated into Salesforce. The system enables bank tellers to capture and manage transfer instructions for high-net-worth (HNW) customers. Each transfer configuration consists of one or more independent **1:1 transfer rows**, each pairing a single source account with a single destination account and an amount. The destination can be either a customer-owned account or any external account searched by name or account number.
 
 ---
 
@@ -18,15 +18,14 @@ This document outlines the functional requirements for a **Multi-Account Transfe
 ### 2.1 User Base
 - **Primary Users:** Bank tellers/employees
 - **On behalf of:** HNW customers with varied business interests and multiple accounts
-- **Target Customers:** Those requiring complex transfer arrangements across multiple accounts
+- **Target Customers:** Those requiring multiple simultaneous transfer instructions in a single case
 
 ### 2.2 Key Use Cases
 | Scenario | Description | Example |
 |----------|-------------|---------|
-| **1:1 Transfer** | Single source → single destination | Transfer $50K from checking to savings |
-| **1:N Transfer** | Single source → multiple destinations | Split investment proceeds to 3 accounts |
-| **N:1 Transfer** | Multiple sources → single destination | Consolidate 5 accounts into one |
-| **N:N Transfer** | Multiple sources → multiple destinations | Distribute across complex account structure |
+| **Single transfer** | One source → one destination | Transfer $50K from checking to savings |
+| **Multiple transfers** | Several independent 1:1 rows | Pay three different payees from three different accounts in one case |
+| **External transfer** | Source is customer-owned; destination is a third-party account | Transfer to an account not owned by the customer (e.g. a beneficiary) |
 
 ### 2.3 Relationship to Salesforce Case
 - The component can be embedded on either an **Account** page (account ID read directly from the record) or a **Case** page (account ID resolved from `Case.AccountId`)
@@ -38,82 +37,99 @@ This document outlines the functional requirements for a **Multi-Account Transfe
 
 ## 3. FUNCTIONAL REQUIREMENTS
 
-### 3.1 Transfer Type (F1)
-**Requirement:** The system shall determine the transfer type automatically from the number of source and destination accounts selected.
+### 3.1 Transfer Model (F1)
+**Requirement:** The system shall support one or more independent 1:1 transfer rows within a single case. Each row pairs exactly one source account with one destination account and one amount.
 
 **Details:**
-- Transfer type is **inferred at save time** — no manual selection required
-- Inference rules:
-
-| Sources | Destinations | Inferred Type |
-|---------|-------------|---------------|
-| 1 | 1 | `1:1` |
-| 1 | > 1 | `1:N` |
-| > 1 | 1 | `N:1` |
-| > 1 | > 1 | `N:N` |
-
-- The inferred type is stored on the transfer record(s) and displayed in the list view
+- A teller starts with zero rows and uses **Add Transfer Row** to add as many as needed
+- Each row is fully independent — there are no cross-row amount constraints
+- All rows share the same transfer date and status
+- Every saved record stores `TransferType = '1:1'`
 
 **Priority:** P0 (Core)
 
 ---
 
-### 3.2 Account Selection (F2)
-**Requirement:** Users shall select source and destination accounts from a shared available pool that updates dynamically as accounts are chosen.
+### 3.2 Account Selection — Source (F2)
+**Requirement:** The source dropdown on each row shall show only accounts owned by the customer on the case.
 
 **Details:**
-- Account list sourced via **`FinancialAccountParty`** (junction object linking `Account` to `FinancialAccount`); only records where `Role = 'Owner'` and `FinancialAccount.Status = 'Active'` are returned
-- Both source and destination dropdowns draw from the **same available pool**, sorted by balance descending
-- Dropdown label format: `Account Name — $X,XXX` (balance rounded to nearest dollar)
-- When an account is selected in either column, it is **removed from both dropdowns** immediately — structural prevention of source/destination overlap and within-column duplicates
-- When the trash icon removes an account from a column, it **returns to both dropdowns** automatically
-- No upper limit on the number of accounts per column
-- Accounts must belong to the customer context of the parent case
+- Account list sourced via **`FinancialAccountParty`** (junction object linking `Account` to `FinancialAccount`); only records where `Role = 'Owner'` and `FinancialAccount.Status = 'Active'` are returned (LIMIT 200)
+- Dropdown label format: `Account Name — $X,XXX` (balance rounded to nearest dollar; shows "No balance" if no `FinancialAccountBalance` record exists)
+- Sorted by balance descending
+- The destination account selected in the same row is excluded from the source dropdown (prevents self-transfer within a row)
+- Each row independently shows the full customer account list — there is no cross-row exclusion from the source dropdown
 
 **Priority:** P0 (Core)
 
 ---
 
-### 3.3 Amount Input (F3)
-**Requirement:** Each selected account row shall display the account details and accept an individual transfer amount.
+### 3.3 Account Selection — Destination (F3)
+**Requirement:** The destination dropdown on each row shall show customer-owned accounts plus an "Other" option that allows the teller to search for any active account in the system.
 
 **Details:**
-- Each selected account row shows:
-  - Account name
-  - Last 4 digits of account number (masked as `****XXXX`)
-  - Current balance (from most recent `FinancialAccountBalance` record)
-  - Currency amount input field
-  - Trash icon to deselect the account
-- Running totals are shown at the bottom of each column once at least one account is selected
-- A mismatch warning is displayed inline when both columns have amounts entered but the totals differ
-- Source total must equal destination total before submission is allowed
+
+#### 3.3.1 Owned Account Selection
+- Same account pool as the source (customer's active owned accounts, sorted by balance descending)
+- The source account selected in the same row is excluded from the destination dropdown (prevents self-transfer within a row)
+- Each row independently shows the full customer account list — there is no cross-row exclusion from the destination dropdown
+
+#### 3.3.2 External Account Selection ("Other")
+- A fixed **"Other — search by account name or number"** option appears at the bottom of every destination dropdown
+- Selecting "Other" reveals a search input directly below the dropdown
+- Minimum 4 characters required to trigger a search; results capped at 20
+- Matches on `FinancialAccount.Name` or `FinancialAccount.FinancialAccountNumber` (LIKE search); active accounts only
+- **Balance is intentionally not returned or displayed** for search results — these may be third-party accounts
+- Selecting a result from the search list locks it in as the destination; the dropdown is replaced by the account name and masked account number (****XXXX) with a close (×) button
+- Clicking × returns the row to the standard dropdown in its unselected state
+- An external account already locked in as destination in another row is excluded from search results in all other rows, preventing the same third-party account from being targeted twice in the same transfer configuration
 
 **Priority:** P0 (Core)
 
 ---
 
-### 3.4 Balance Validation (F4)
-**Requirement:** System shall validate that source accounts have sufficient balance before a transfer is submitted.
+### 3.4 Amount Input (F4)
+**Requirement:** Each transfer row shall have a single currency amount field.
 
 **Details:**
-- Validation is triggered on **Submit** only (not on Draft save)
-- Check per source account: entered amount ≤ available balance for that account
-- If insufficient balance:
-  - Inline error message identifies the account (by last 4 digits) and states the shortfall
-  - Form submission is blocked
-- Balance data retrieved from the most recent `FinancialAccountBalance` record per account, ordered by `BalanceAsOfDate DESC, CreatedDate DESC`
-- Accounts with no `FinancialAccountBalance` record still allow amount entry; balance check is skipped for those accounts
+- Each row has one amount input field (currency, step 0.01)
+- There are no per-column totals or cross-row total-match constraints — each row is independent
+- Amount must be greater than zero before the configuration can be saved
 
 **Priority:** P0 (Core)
 
 ---
 
-### 3.5 Transfer Configuration Persistence (F5)
+### 3.5 Balance Validation (F5)
+**Requirement:** Balance enforcement shall be configurable via a single constant and is disabled by default.
+
+**Details:**
+- Controlled by `ENFORCE_BALANCE_CHECK` in `TransferConfigurationController.cls`:
+
+```apex
+private static final Boolean ENFORCE_BALANCE_CHECK = false;
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `false` (default) | No balance check — amounts are accepted as entered |
+| `true` | Server-side check on save: queries the latest `FinancialAccountBalance` per source account and throws an `AuraHandledException` if any row's amount exceeds the available balance |
+
+- When enabled, the check runs for both Draft and Submit saves (server-side)
+- The check uses the most recent `FinancialAccountBalance` record per source account, ordered by `BalanceAsOfDate DESC, CreatedDate DESC`
+- Accounts with no balance record are skipped
+- **Rationale for default-off:** Balance enforcement is handled downstream by the actual transfer execution process; capturing the instruction at time of teller entry does not require a real-time balance gate
+
+**Priority:** P1 (High)
+
+---
+
+### 3.6 Transfer Configuration Persistence (F6)
 **Requirement:** System shall save transfer configurations using a configurable storage object, switchable between a custom development object and the standard FSC object.
 
 **Details:**
 
-#### 3.5.1 Dual-Object Architecture
+#### 3.6.1 Dual-Object Architecture
 A single boolean constant in `TransferConfigurationController.cls` controls which object is used:
 
 ```apex
@@ -127,7 +143,7 @@ private static final Boolean USE_STANDARD_OBJECT = false;
 
 Flipping the constant and redeploying the Apex class is the only change required to switch.
 
-#### 3.5.2 Custom Object: `Fund_Transfer_Request__c`
+#### 3.6.2 Custom Object: `Fund_Transfer_Request__c`
 | Field | API Name | Type | Notes |
 |-------|----------|------|-------|
 | Request Number | `Name` | Auto Number | Format: `FTR-{0000}` |
@@ -137,9 +153,9 @@ Flipping the constant and redeploying the Apex class is the only change required
 | Amount | `Amount__c` | Currency (18,2) | Amount for this FROM→TO pair |
 | Start Date | `Start_Date__c` | Date | Requested transfer date |
 | Status | `Status__c` | Picklist | Values: `Draft`, `Submitted` (not restricted) |
-| Transfer Type | `Transfer_Type__c` | Picklist | Values: `1:1`, `1:N`, `N:1`, `N:N` (not restricted) |
+| Transfer Type | `Transfer_Type__c` | Picklist | Always stored as `1:1` |
 
-#### 3.5.3 Standard FSC Object: `FundTransferRequest`
+#### 3.6.3 Standard FSC Object: `FundTransferRequest`
 | Field | API Name | Type | Notes |
 |-------|----------|------|-------|
 | Name | `Name` | Auto Number | Auto-generated |
@@ -149,48 +165,34 @@ Flipping the constant and redeploying the Apex class is the only change required
 | Amount | `Amount` | Currency | Amount for this FROM→TO pair — **always required** |
 | Start Date | `StartDate` | Date | Requested transfer date |
 | Status | `Status` | Picklist | Values depend on org configuration |
-| Transfer Type | `TransferType` | Picklist | **Restricted picklist** — values `1:1`, `1:N`, `N:1`, `N:N` must be added in Setup → Object Manager → FundTransferRequest → TransferType → Edit Values before use |
+| Transfer Type | `TransferType` | Picklist | Always stored as `1:1`; value must exist in the picklist |
 
-> **Platform constraint:** `FundTransferRequest` requires **both `FromId` and `ToId` to be set** on every record. Source-only or destination-only records fail a platform validation rule ("Amount is required unless Recurring Payment Option is provided"). Every saved record therefore represents a specific FROM→TO pair.
+> **Platform constraint:** `FundTransferRequest` requires **both `FromId` and `ToId` to be set** on every record. Every saved record therefore represents a specific FROM→TO pair — which aligns directly with the 1:1 row model.
 
-#### 3.5.4 Paired Record Strategy per Transfer Type
-| Transfer Type | Records Created | FromId | ToId | Amount per record |
-|---|---|---|---|---|
-| **1:1** | 1 | single source | single destination | source amount |
-| **1:N** | N (one per destination) | same source | each destination | destination amount |
-| **N:1** | N (one per source) | each source | same destination | source amount |
-| **N:N** | ≤ M+N−1 (waterfall) | see §3.5.5 | see §3.5.5 | see §3.5.5 |
+#### 3.6.4 Record Strategy
+Each row in the UI maps to exactly **one** saved record. There is no waterfall or pairing algorithm.
 
-#### 3.5.5 N:N Waterfall Distribution Algorithm
-For N:N transfers, the system uses a greedy waterfall to create the minimum number of FROM→TO pairs while preserving source and destination totals exactly:
+| UI Rows | Records Created | FromId | ToId | Amount |
+|---------|----------------|--------|------|--------|
+| N | N | row's source account | row's destination account | row's amount |
 
-1. Maintain a remaining-balance list for each source and destination
-2. Walk two pointers (source index `si`, destination index `di`) simultaneously
-3. At each step, pair amount = `min(srcRemaining[si], dstRemaining[di])`
-4. Create one `FundTransferRequest` record for that pair and amount
-5. Subtract the pair amount from both remaining balances; advance the pointer whose balance reaches zero
-6. Repeat until all accounts are exhausted
-
-This produces at most **M + N − 1** records (where M = source count, N = destination count). The pairing order follows the order accounts were selected in the UI.
-
-#### 3.5.6 Edit Behaviour
+#### 3.6.5 Edit Behaviour
 - Saving an edited transfer (Draft or Submit) **replaces** all existing records for the case atomically: existing records are deleted and the new set is inserted in the same transaction
-- The UI pre-populates the form on Edit with the existing accounts and amounts read from `wiredSummary`
+- The UI pre-populates the form on Edit by reconstructing each row from the saved records; if a destination account is not in the customer's owned account list it is treated as an external account and rendered as a locked chip
 
 **Priority:** P0 (Core)
 
 ---
 
-### 3.6 Data Display in Case (F6)
+### 3.7 Data Display in Case (F7)
 **Requirement:** Transfer configurations shall be visible and easily readable within the case context.
 
 **Details:**
 
 **List mode (default view):**
-- Shows transfer date, status badge
-- Two-column layout: Source Accounts (left) | Destination Accounts (right)
-- Each account shown with masked account number (`Type • ****XXXX`) and aggregated amount
-- Amounts are aggregated per unique account across all paired records (a source appearing in multiple pairs shows its total outgoing amount)
+- Shows transfer date and status badge
+- Per-row table with columns: Source | Destination | Amount
+- Each account shown with name and masked account number (****XXXX)
 - **Edit** button → switches to form mode with data pre-populated
 - **Reset** button → confirmation dialog → deletes all transfer records for the case
 
@@ -198,23 +200,27 @@ This produces at most **M + N − 1** records (where M = source count, N = desti
 - When no records exist: icon, help text, and "New Transfer Request" button
 
 **Form mode:**
-- Transfer date input
-- Source column: account picker (sorted by balance) + selected account cards + running total
-- Destination column: same structure
-- Actions: Save as Draft / Submit / Cancel
+- Transfer date input at the top
+- Column headers: Source Account | Destination Account | Amount
+- Each row: source combobox | destination combobox (or search / chip for external) | amount input | delete button
+- **+ Add Transfer Row** button (lower left)
+- Actions: Save as Draft / Submit / Cancel (lower right)
 
 **Priority:** P1 (High)
 
 ---
 
-### 3.7 Error Handling & User Feedback (F7)
+### 3.8 Error Handling & User Feedback (F8)
 **Requirement:** System shall provide clear error messaging and validation feedback.
 
 **Details:**
 - **Validation errors** shown inline above the form actions
-- **Insufficient balance:** `"Account ****XXXX has $X,XXX available but $X,XXX requested."`
-- **Total mismatch:** shown as an inline warning in real time; blocks submission
-- **Missing fields:** `"All amount fields must be greater than zero."`, `"Transfer date is required."`
+- **Missing source/destination:** `"All rows must have a source account selected."` / `"All rows must have a destination account selected."`
+- **Self-transfer:** `"Source and destination cannot be the same account."`
+- **Zero amount:** `"All rows must have an amount greater than zero."`
+- **Missing date:** `"Transfer date is required."`
+- **No rows:** `"At least one transfer row is required."`
+- **Balance exceeded (when enabled):** Apex throws a message identifying the account ID, available balance, and requested amount
 - **Success:** toast notification on successful Draft save or Submit
 - **Apex errors:** DML errors, field errors, and `AuraHandledException` messages all surface correctly via `_extractError()` in the LWC
 
@@ -222,14 +228,14 @@ This produces at most **M + N − 1** records (where M = source count, N = desti
 
 ---
 
-### 3.8 Access Control (F8)
+### 3.9 Access Control (F9)
 **Requirement:** Users must be granted explicit access to the custom object and Apex controller via a permission set.
 
 **Details:**
 - Permission set: **Transfer Configuration User** (`Transfer_Configuration_User`)
 - Grants:
   - Create / Read / Edit / Delete on `Fund_Transfer_Request__c`
-  - Read + Edit on all seven custom fields
+  - Read + Edit on all custom fields
   - Apex class access for `TransferConfigurationController`
 - Assign to teller profiles via Setup → Permission Sets → Manage Assignments
 - When switching to the standard `FundTransferRequest` object, a separate permission set or profile update is required for that object
@@ -241,25 +247,27 @@ This produces at most **M + N − 1** records (where M = source count, N = desti
 ## 4. SYSTEM CONSTRAINTS & BUSINESS RULES
 
 ### 4.1 Account Limits
-- No upper limit on the number of source or destination accounts per transfer
-- Accounts are loaded via `FinancialAccountParty` with a SOQL `LIMIT 200` safeguard
+- No upper limit on the number of transfer rows
+- Customer accounts are loaded via `FinancialAccountParty` with a SOQL `LIMIT 200` safeguard
+- External account search returns at most 20 results per query
 
 ### 4.2 Amount Rules
 - All amounts must be **positive numbers greater than zero**
 - Currency formatting automatically applied in the UI
-- Draft saves do not enforce balance or total-match constraints
-- Submit enforces both balance and source/destination total-match constraints
+- No cross-row total-match constraint — each row is independent
+- Draft saves do not enforce balance constraints (even when `ENFORCE_BALANCE_CHECK = true`, only server-side saves check balance — see §3.5)
 
 ### 4.3 Account Selection Rules
-- The same account **cannot appear in both source and destination** — enforced structurally by the shared available pool (selecting an account removes it from both dropdowns)
-- An account **cannot be selected twice** in the same column — also enforced structurally by the shared pool
-- Accounts must belong to the customer context of the parent case
-- Only accounts with `FinancialAccountParty.Role = 'Owner'` and `FinancialAccount.Status = 'Active'` are shown
+- Within a single row: source and destination **cannot be the same account**
+- Each row draws from the **full** customer account list independently — an account used as source in row 1 can still appear as source in row 2
+- The same external account **cannot be selected as destination in more than one row** — enforced by filtering it out of all other rows' "Other" search results once locked in
+- Only accounts with `FinancialAccountParty.Role = 'Owner'` and `FinancialAccount.Status = 'Active'` appear in owned-account dropdowns
+- External accounts (via "Other") are restricted to `FinancialAccount.Status = 'Active'`; no ownership constraint
 
-### 4.4 Balance Validation Timing
-- Balance is loaded at component initialisation via `getFinancialAccounts` wire
-- Validation against balance is performed client-side on Submit
-- Balance displayed on each selected account card for reference during amount entry
+### 4.4 Balance Validation
+- Controlled by `ENFORCE_BALANCE_CHECK` constant (default `false`) — see §3.5
+- When enabled, validation runs server-side at save time against `FinancialAccountBalance`
+- Balance is still **displayed** in the source dropdown label for reference, regardless of whether enforcement is enabled
 
 ### 4.5 `@AuraEnabled` Parameter Constraint
 - Salesforce's `@AuraEnabled` framework silently nullifies `List<CustomInnerClass>` method parameters
@@ -275,67 +283,75 @@ The component operates in two modes, toggled by user action:
 
 **List Mode (default)**
 ```
-┌──────────────────────────────────────────────────┐
-│  Transfer Requests                               │
-├──────────────────────────────────────────────────┤
-│  Transfer Date: June 17, 2026   Status: [Draft]  │
-│                                                  │
-│  Source Accounts      │  Destination Accounts    │
-│  ─────────────────    │  ─────────────────────   │
-│  Savings • ****1234   │  Checking • ****5678     │
-│                $300   │                  $300    │
-│                                                  │
-│  [ Edit ]  [ Reset ]                             │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Transfer Requests                                       │
+├──────────────────────────────────────────────────────────┤
+│  Transfer Date: June 17, 2026        Status: [Draft]     │
+│                                                          │
+│  Source              Destination           Amount        │
+│  ─────────────────── ───────────────────── ──────────    │
+│  Savings ****1234    Checking ****5678     $300.00       │
+│  Business ****9012   Beneficiary ****3456  $5,000.00     │
+│                                                          │
+│  [ Edit ]  [ Reset ]                                     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 **Form Mode (New / Edit)**
 ```
-┌──────────────────────────────────────────────────┐
-│  Transfer Requests                               │
-├──────────────────────────────────────────────────┤
-│  Transfer Date: [__________]                     │
-│                                                  │
-│  Source Accounts       │  Destination Accounts   │
-│  ──────────────────    │  ────────────────────   │
-│  [Add source acct ▼]   │  [Add dest acct   ▼]   │
-│                        │                         │
-│  ┌──────────────────┐  │  ┌──────────────────┐  │
-│  │ Savings ****1234 │  │  │ Checking ****5678│  │
-│  │ Bal: $10,000     │  │  │ Bal: $5,000      │  │
-│  │ Amount [$300] [🗑]│  │  │ Amount [$300] [🗑]│  │
-│  └──────────────────┘  │  └──────────────────┘  │
-│  Total: $300           │  Total: $300            │
-│                                                  │
-│  [ Save as Draft ]  [ Submit ]  [ Cancel ]       │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Transfer Requests                                       │
+├──────────────────────────────────────────────────────────┤
+│  Transfer Date: [__________]                             │
+│                                                          │
+│  Source Account     Destination Account     Amount       │
+│  ──────────────     ────────────────────     ──────      │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ [Select source ▼] [Select destination ▼] [$   ] [🗑]│ │
+│  └─────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ [Select source ▼] [Other — search...    ] [$   ] [🗑]│ │
+│  │                    Search: [____________]        │    │
+│  │                    > Beneficiary ****3456        │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                          │
+│  [+ Add Transfer Row]         [Save as Draft][Submit]    │
+│                               [Cancel]                   │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### 5.2 Responsive Design
 - Component optimised for desktop (primary use case: teller workstations)
 - Deployed as a `lightning__RecordPage` component for both `Account` and `Case` objects, Large form factor only
 
-### 5.3 User Interaction Flow
+### 5.3 Destination "Other" Flow
+1. Teller opens destination dropdown → sees owned accounts + "Other — search by account name or number" at the bottom
+2. Selects "Other" → a search input appears below the dropdown (which remains showing "Other" selected)
+3. Teller types ≥ 4 characters → debounced search fires, results appear as a clickable list
+4. Teller clicks a result → search UI disappears; destination cell shows the account name and ****XXXX with a × button
+5. To change: teller clicks × → destination resets to the standard dropdown (unselected)
+6. To switch back to an owned account without using ×: teller can select any owned account from the dropdown while the search is visible — this cancels "Other" mode
+
+### 5.4 User Interaction Flow
 
 **New transfer:**
 1. Teller opens Case record → sees empty state with "New Transfer Request" button
-2. Clicks New → form mode opens
+2. Clicks New → form mode opens (no rows yet)
 3. Selects transfer date
-4. Picks source account(s) from the shared dropdown (sorted by balance descending)
-5. Picks destination account(s) from the same shared dropdown
-6. Enters amounts for each selected account — running totals update live
-7. Clicks **Save as Draft** (skips balance and total-match checks) or **Submit** (full validation)
-8. On success: toast notification, form resets, list mode shows the saved summary
+4. Clicks **+ Add Transfer Row** for each transfer needed
+5. For each row: selects source from dropdown; selects destination from dropdown or uses "Other" to search; enters amount
+6. Clicks **Save as Draft** (skips balance check) or **Submit** (triggers balance check if enabled)
+7. On success: toast notification, form resets, list mode shows the saved summary
 
 **Edit transfer:**
 1. Teller clicks **Edit** on the list view
-2. Form opens pre-populated with existing accounts and amounts
-3. Teller modifies accounts or amounts as needed
+2. Form opens pre-populated: owned-account destinations show in the dropdown; external destinations show as locked chips
+3. Teller modifies rows as needed (add, remove, change accounts or amounts)
 4. Saves — existing records deleted and new set inserted atomically
 
 **Reset transfer:**
 1. Teller clicks **Reset** → confirmation dialog
-2. On confirm: all `Fund_Transfer_Request__c` records for the case are deleted
+2. On confirm: all transfer records for the case are deleted
 3. Component returns to empty state
 
 ---
@@ -346,9 +362,10 @@ The component operates in two modes, toggled by user action:
 
 ```
 Case
-  └─ Fund_Transfer_Request__c / FundTransferRequest (one record per FROM→TO pair)
-       ├─ From_Account__c / FromId → FinancialAccount (source — always required)
-       └─ To_Account__c  / ToId   → FinancialAccount (destination — always required)
+  └─ Fund_Transfer_Request__c / FundTransferRequest
+       │   (one record per UI row; always a 1:1 pair)
+       ├─ From_Account__c / FromId → FinancialAccount (source — customer-owned)
+       └─ To_Account__c  / ToId   → FinancialAccount (destination — owned or external)
 
 Account (Customer)
   └─ FinancialAccountParty (junction — Role = 'Owner')
@@ -369,29 +386,48 @@ Account (Customer)
 
 | Method | Type | Purpose |
 |--------|------|---------|
-| `getFinancialAccounts(accountId)` | `@AuraEnabled(cacheable=true)` | Returns active financial accounts for the customer, with most recent balance |
-| `getTransferSummary(caseId)` | `@AuraEnabled(cacheable=true)` | Returns aggregated source/destination summary from existing transfer records |
-| `saveTransferRequests(payloadJson)` | `@AuraEnabled` | Deletes existing records for the case and inserts the new set; applies waterfall for N:N |
+| `getFinancialAccounts(accountId)` | `@AuraEnabled(cacheable=true)` | Returns active financial accounts owned by the customer, with most recent balance |
+| `searchFinancialAccounts(searchTerm)` | `@AuraEnabled(cacheable=true)` | Ad-hoc search across all active `FinancialAccount` records by name or account number; requires ≥ 4 chars; returns max 20 results; no balance returned |
+| `getTransferSummary(caseId)` | `@AuraEnabled(cacheable=true)` | Returns one `TransferSummaryRow` per saved record (source name/number, dest name/number, amount) |
+| `saveTransferRequests(payloadJson)` | `@AuraEnabled` | Deletes existing records for the case and inserts one record per UI row; optionally validates balances if `ENFORCE_BALANCE_CHECK = true` |
 | `deleteTransferRequests(caseId)` | `@AuraEnabled` | Deletes all transfer records for the case (Reset action) |
 
-### 6.4 Object Switch Constants
+### 6.4 Configurable Constants
 
 ```apex
+// Switches storage between custom dev object and standard FSC object.
 private static final Boolean USE_STANDARD_OBJECT = false;
 
-private static final String OBJ    = USE_STANDARD_OBJECT ? 'FundTransferRequest'  : 'Fund_Transfer_Request__c';
-private static final String F_CASE = USE_STANDARD_OBJECT ? 'CaseId'               : 'Case__c';
-private static final String F_FROM = USE_STANDARD_OBJECT ? 'FromId'               : 'From_Account__c';
-private static final String F_TO   = USE_STANDARD_OBJECT ? 'ToId'                 : 'To_Account__c';
-private static final String F_AMT  = USE_STANDARD_OBJECT ? 'Amount'               : 'Amount__c';
-private static final String F_DATE = USE_STANDARD_OBJECT ? 'StartDate'            : 'Start_Date__c';
-private static final String F_STAT = USE_STANDARD_OBJECT ? 'Status'               : 'Status__c';
-private static final String F_TYPE = USE_STANDARD_OBJECT ? 'TransferType'         : 'Transfer_Type__c';
+// Set true to enforce server-side balance check at save time.
+// Leave false when balance enforcement is handled downstream.
+private static final Boolean ENFORCE_BALANCE_CHECK = false;
+
+// Minimum characters required to trigger the external account search.
+private static final Integer SEARCH_MIN_LENGTH = 4;
+
+// Maximum results returned by searchFinancialAccounts.
+private static final Integer SEARCH_RESULT_LIMIT = 20;
 ```
 
-All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJECT` to `true` and redeploying the Apex class is the only migration step required.
+### 6.5 LWC State Model
 
-### 6.5 Deployed Metadata
+Each transfer row is stored as an object in the `transferRows` tracked array:
+
+| Property | Type | Purpose |
+|----------|------|---------|
+| `_key` | Number | Unique render key |
+| `sourceAccountId` | String \| null | Selected source account ID |
+| `destAccountId` | String \| null | Selected destination account ID (owned or external) |
+| `destIsExternal` | Boolean | True when destination was found via "Other" search |
+| `destExternalName` | String \| null | Display name for locked external account |
+| `destExternalLastFour` | String \| null | Last 4 digits of external account number |
+| `amount` | value \| null | Raw input from the amount field |
+| `destSearchTerm` | String | Current search input for "Other" lookup |
+| `_destSearchRawResults` | Array | Raw results from last `searchFinancialAccounts` call |
+
+The `displayRows` getter produces a computed array from `transferRows` with per-row option lists and search results, consumed directly by the template.
+
+### 6.6 Deployed Metadata
 
 | Artifact | Type | Purpose |
 |----------|------|---------|
@@ -400,7 +436,7 @@ All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJ
 | `Fund_Transfer_Request__c` | Custom Object | Transfer records (dev org) |
 | `Transfer_Configuration_User` | Permission Set | Field/object/class access for tellers |
 
-### 6.6 Integration Points
+### 6.7 Integration Points
 - **Inbound:** Case object context (customer, case ID); Account page also supported (read-only view; saves require Case context)
 - **Outbound:** Transfer data stored in Salesforce; external transfer system reads via API
 - **No external API calls** in this scope
@@ -412,46 +448,50 @@ All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJ
 1. **Actual Fund Transfer Execution** — backend/external system responsibility
 2. **Audit Trail & Compliance** — regulatory compliance features (AML, KYC, etc.)
 3. **Approval Workflows** — no manual approval steps required
-4. **Inter-Bank Transfers** — transfers limited to accounts within Salesforce
-5. **Transfer Scheduling** — future-dated transfers beyond the transfer date field
-6. **Fee Calculation** — no fee computation or display
-7. **Multi-Currency** — assumed single currency environment
-8. **Reporting & Analytics** — dashboards and reports on transfers
-9. **Mobile App** — desktop-first implementation; mobile form factor not configured
-10. **Configurable Account Query (CMT)** — account query is currently hardcoded to `FinancialAccountParty` with `Role = 'Owner'` and `Status = 'Active'`; CMT-based configuration is a future enhancement
+4. **Transfer Scheduling** — future-dated transfers beyond the transfer date field
+5. **Fee Calculation** — no fee computation or display
+6. **Multi-Currency** — assumed single currency environment
+7. **Reporting & Analytics** — dashboards and reports on transfers
+8. **Mobile App** — desktop-first implementation; mobile form factor not configured
+9. **Configurable Account Query (CMT)** — account query is currently hardcoded to `FinancialAccountParty` with `Role = 'Owner'` and `Status = 'Active'`; CMT-based configuration is a future enhancement
+10. **Cross-row duplicate source/destination enforcement** — each row is independent; the same owned account can appear as source or destination in multiple rows
 
 ---
 
 ## 8. FUTURE ENHANCEMENTS (Post-MVP)
 
 1. **Migrate to Standard Object** — set `USE_STANDARD_OBJECT = true` once `FundTransferRequest.TransferType` picklist values are configured in the target org
-2. **Approval Workflows** — add approval routing for high-value transfers
-3. **Audit & Compliance** — regulatory compliance features
-4. **Transfer Scheduling** — schedule transfers for future execution dates
-5. **Templates** — save and reuse transfer configurations
-6. **Bulk Upload** — CSV/Excel import for multiple transfers
-7. **Analytics Dashboard** — track transfer volumes and patterns
-8. **Configurable Account Query** — CMT-driven SOQL filter and sort for account dropdowns
-9. **Notification System** — email/SMS notifications on transfer completion
+2. **Enable Balance Enforcement** — set `ENFORCE_BALANCE_CHECK = true` when downstream systems are ready to rely on the saved amount being pre-validated
+3. **Approval Workflows** — add approval routing for high-value transfers
+4. **Audit & Compliance** — regulatory compliance features
+5. **Transfer Scheduling** — schedule transfers for future execution dates
+6. **Templates** — save and reuse transfer configurations
+7. **Bulk Upload** — CSV/Excel import for multiple transfer rows
+8. **Analytics Dashboard** — track transfer volumes and patterns
+9. **Configurable Account Query** — CMT-driven SOQL filter and sort for account dropdowns
+10. **Notification System** — email/SMS notifications on transfer completion
 
 ---
 
 ## 9. ACCEPTANCE CRITERIA
 
 ### 9.1 Functional Acceptance Criteria
-- [x] Transfer type inferred automatically from account counts; stored on the record
-- [x] Account dropdowns show all active accounts for the customer sorted by balance descending
-- [x] Selecting an account removes it from both dropdowns; trashing it restores it to both
-- [x] Selected account rows show name, masked account number, balance, amount input, and remove button
-- [x] Individual amounts can be entered per account on each side
-- [x] Running totals displayed per column; mismatch warning shown in real time
-- [x] Balance validation (Submit only) prevents transfers that exceed available balance
-- [x] Total-match validation (Submit only) prevents submission when source ≠ destination total
-- [x] Draft save bypasses balance and total-match checks
-- [x] Transfer configuration saves atomically to `Fund_Transfer_Request__c` as paired FROM→TO records
-- [x] N:N transfers use the waterfall algorithm; produce at most M+N−1 records
-- [x] List view shows aggregated source/destination accounts and amounts
-- [x] Edit pre-populates the form with existing accounts and amounts
+- [x] Each transfer row independently pairs one source account, one destination account, and one amount
+- [x] Source dropdown shows customer's active owned accounts sorted by balance descending
+- [x] Source dropdown excludes the destination account selected in the same row
+- [x] Destination dropdown shows customer's active owned accounts plus an "Other" option
+- [x] Destination dropdown excludes the source account selected in the same row
+- [x] Selecting "Other" in the destination reveals a search field; ≥ 4 characters triggers a search
+- [x] Search results show account name and masked number; balance is not displayed for external accounts
+- [x] An external account locked in as destination in one row does not appear in search results for other rows
+- [x] Locking in an external account replaces the search UI with a chip showing name and ****XXXX
+- [x] Clicking × on an external chip returns the row to the standard destination dropdown
+- [x] Rows can be added (up to any number) and removed individually
+- [x] Validation prevents saving with: missing source, missing destination, self-transfer, zero amount, missing date, or zero rows
+- [x] Balance validation is off by default; enabled by flipping `ENFORCE_BALANCE_CHECK = true`
+- [x] Each UI row maps to exactly one saved record (`TransferType = '1:1'`)
+- [x] List view shows a per-row table: Source | Destination | Amount
+- [x] Edit pre-populates the form; external destinations reload as locked chips
 - [x] Save on edit replaces existing records atomically (delete + insert in one transaction)
 - [x] Reset deletes all transfer records after confirmation
 - [x] Component embeddable on both Account and Case record pages
@@ -459,14 +499,15 @@ All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJ
 
 ### 9.2 Performance Criteria
 - Component loads within **2 seconds**
-- Balance validation completes within **1 second**
+- External account search returns results within **2 seconds** of the 4th character being typed
 - Form submission completes within **3 seconds**
 - Dropdown accounts populate within **1 second** of component load
 
 ### 9.3 Data Integrity Criteria
-- Every `Fund_Transfer_Request__c` record has both `From_Account__c` and `To_Account__c` populated
-- All records for a transfer share the same `Case__c`, `Start_Date__c`, `Status__c`, and `Transfer_Type__c`
+- Every saved record has both `From_Account__c` and `To_Account__c` populated
+- All records for a transfer configuration share the same `Case__c`, `Start_Date__c`, and `Status__c`
 - Saving an edit never results in orphaned or duplicate records
+- `Transfer_Type__c` is always stored as `1:1`
 
 ---
 
@@ -475,13 +516,13 @@ All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJ
 | Term | Definition |
 |------|-----------|
 | **HNW Customer** | High-Net-Worth customer with multiple accounts and complex banking needs |
-| **Transfer Configuration** | The complete definition of a multi-account transfer (sources, destinations, amounts) |
-| **Paired Record** | A single `Fund_Transfer_Request__c` record representing one FROM→TO account pair with an amount |
-| **Waterfall Algorithm** | Greedy two-pointer algorithm that creates the minimum number of FROM→TO pairs for N:N transfers while preserving source and destination totals exactly |
-| **Available Pool** | The set of financial accounts not yet selected in either column; drives both source and destination dropdowns |
+| **Transfer Configuration** | The complete set of 1:1 transfer rows for a case (date, status, and all rows) |
+| **Transfer Row** | A single UI row pairing one source account, one destination account, and one amount — maps 1:1 to a saved record |
+| **External Account** | Any `FinancialAccount` not owned by the case's customer, selected via the "Other" search path |
 | **USE_STANDARD_OBJECT** | Boolean constant in `TransferConfigurationController` that switches between the custom and standard storage objects |
+| **ENFORCE_BALANCE_CHECK** | Boolean constant in `TransferConfigurationController` that enables/disables server-side balance validation at save time |
 | **Financial Account** | Salesforce FSC standard object representing a customer's bank account (`FinancialAccount`) |
-| **Balance Validation** | Check performed on Submit that ensures each source account's entered amount does not exceed its available balance |
+| **displayRows** | LWC computed getter that enriches each raw `transferRows` entry with per-row option lists, search results, and display flags consumed by the template |
 
 ---
 
@@ -491,6 +532,7 @@ All SOQL, DML, and field access uses these constants. Changing `USE_STANDARD_OBJ
 |---------|------|--------|---------|
 | 1.0 | June 6, 2026 | | Initial functional requirements draft |
 | 2.0 | June 7, 2026 | | Updated to reflect implemented solution: dual-object architecture, shared pool UI, waterfall N:N algorithm, inferred transfer type, permission set, paired record strategy, edit pre-population |
+| 3.0 | June 10, 2026 | | Full redesign: replaced M:N model with multiple independent 1:1 rows; added "Other" external account search on destination; removed per-side totals and total-match validation; replaced client-side balance check with configurable server-side `ENFORCE_BALANCE_CHECK` constant (default off); updated UI to row-based grid; updated Apex summary to per-row `TransferSummaryRow`; updated all acceptance criteria and glossary |
 
 ---
 

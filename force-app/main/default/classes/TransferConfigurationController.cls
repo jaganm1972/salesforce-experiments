@@ -6,19 +6,19 @@ public with sharing class TransferConfigurationController {
     // Flip this one constant and redeploy — nothing else needs to change.
     private static final Boolean USE_STANDARD_OBJECT = false;
 
-    private static final String OBJ     = USE_STANDARD_OBJECT ? 'FundTransferRequest'  : 'Fund_Transfer_Request__c';
-    private static final String F_CASE  = USE_STANDARD_OBJECT ? 'CaseId'               : 'Case__c';
-    private static final String F_FROM  = USE_STANDARD_OBJECT ? 'FromId'               : 'From_Account__c';
-    private static final String F_TO    = USE_STANDARD_OBJECT ? 'ToId'                 : 'To_Account__c';
-    private static final String F_AMT   = USE_STANDARD_OBJECT ? 'Amount'               : 'Amount__c';
-    private static final String F_DATE  = USE_STANDARD_OBJECT ? 'StartDate'            : 'Start_Date__c';
-    private static final String F_STAT  = USE_STANDARD_OBJECT ? 'Status'               : 'Status__c';
-    private static final String F_TYPE  = USE_STANDARD_OBJECT ? 'TransferType'         : 'Transfer_Type__c';
+    private static final String OBJ    = USE_STANDARD_OBJECT ? 'FundTransferRequest'  : 'Fund_Transfer_Request__c';
+    private static final String F_CASE = USE_STANDARD_OBJECT ? 'CaseId'               : 'Case__c';
+    private static final String F_FROM = USE_STANDARD_OBJECT ? 'FromId'               : 'From_Account__c';
+    private static final String F_TO   = USE_STANDARD_OBJECT ? 'ToId'                 : 'To_Account__c';
+    private static final String F_AMT  = USE_STANDARD_OBJECT ? 'Amount'               : 'Amount__c';
+    private static final String F_DATE = USE_STANDARD_OBJECT ? 'StartDate'            : 'Start_Date__c';
+    private static final String F_STAT = USE_STANDARD_OBJECT ? 'Status'               : 'Status__c';
+    private static final String F_TYPE = USE_STANDARD_OBJECT ? 'TransferType'         : 'Transfer_Type__c';
 
     // ── Inner classes ──────────────────────────────────────────────────────────
 
     public class FinancialAccountInfo {
-        @AuraEnabled public Id id;
+        @AuraEnabled public Id     id;
         @AuraEnabled public String name;
         @AuraEnabled public String type;
         @AuraEnabled public String financialAccountNumber;
@@ -26,34 +26,35 @@ public with sharing class TransferConfigurationController {
         @AuraEnabled public Decimal balance;
     }
 
+    // One row in the save payload — always a 1:1 transfer.
     public class TransferRow {
-        @AuraEnabled public Id financialAccountId;
-        @AuraEnabled public Decimal amount;
+        public String  fromId;
+        public String  toId;
+        public Decimal amount;
     }
 
-    public class TransferLineInfo {
-        @AuraEnabled public Id recordId;
-        @AuraEnabled public String accountName;
-        @AuraEnabled public String accountNumber;
-        @AuraEnabled public String accountType;
+    // One row in the read-side summary — mirrors the saved record 1:1.
+    public class TransferSummaryRow {
+        @AuraEnabled public Id     sourceId;
+        @AuraEnabled public String sourceName;
+        @AuraEnabled public String sourceNumber;
+        @AuraEnabled public Id     destId;
+        @AuraEnabled public String destName;
+        @AuraEnabled public String destNumber;
         @AuraEnabled public Decimal amount;
     }
 
     public class TransferSummary {
-        @AuraEnabled public Date transferDate;
+        @AuraEnabled public Date   transferDate;
         @AuraEnabled public String status;
-        @AuraEnabled public String transferType;
-        @AuraEnabled public List<TransferLineInfo> sources;
-        @AuraEnabled public List<TransferLineInfo> destinations;
+        @AuraEnabled public List<TransferSummaryRow> rows;
     }
 
     public class SavePayload {
         public String caseId;
-        public String transferType; // drives routing logic; also written to the record
         public String startDate;
         public String status;
-        public List<TransferRow> sourceRows;
-        public List<TransferRow> destinationRows;
+        public List<TransferRow> rows;
     }
 
     // ── getFinancialAccounts ───────────────────────────────────────────────────
@@ -98,12 +99,12 @@ public with sharing class TransferConfigurationController {
         List<FinancialAccountInfo> result = new List<FinancialAccountInfo>();
         for (FinancialAccountParty party : parties) {
             FinancialAccountInfo info = new FinancialAccountInfo();
-            info.id = party.FinancialAccountId;
-            info.name = party.FinancialAccount.Name;
-            info.type = party.FinancialAccount.Type;
+            info.id                   = party.FinancialAccountId;
+            info.name                 = party.FinancialAccount.Name;
+            info.type                 = party.FinancialAccount.Type;
             info.financialAccountNumber = party.FinancialAccount.FinancialAccountNumber;
-            info.status = party.FinancialAccount.Status;
-            info.balance = balanceByAccountId.get(party.FinancialAccountId);
+            info.status               = party.FinancialAccount.Status;
+            info.balance              = balanceByAccountId.get(party.FinancialAccountId);
             result.add(info);
         }
         return result;
@@ -114,7 +115,12 @@ public with sharing class TransferConfigurationController {
     // (e.g. paying a third party). Requires a minimum search length and caps
     // results so we never expose a browsable list of other customers' accounts.
 
-    private static final Integer SEARCH_MIN_LENGTH = 4;
+    // Set to true to block saves when a source account's requested amount exceeds
+    // its latest known balance. Leave false when balance enforcement is handled
+    // downstream (e.g. by the actual transfer execution process).
+    private static final Boolean ENFORCE_BALANCE_CHECK = false;
+
+    private static final Integer SEARCH_MIN_LENGTH   = 4;
     private static final Integer SEARCH_RESULT_LIMIT = 20;
 
     @AuraEnabled(cacheable=true)
@@ -138,11 +144,11 @@ public with sharing class TransferConfigurationController {
         List<FinancialAccountInfo> result = new List<FinancialAccountInfo>();
         for (FinancialAccount fa : accounts) {
             FinancialAccountInfo info = new FinancialAccountInfo();
-            info.id = fa.Id;
-            info.name = fa.Name;
-            info.type = fa.Type;
+            info.id                   = fa.Id;
+            info.name                 = fa.Name;
+            info.type                 = fa.Type;
             info.financialAccountNumber = fa.FinancialAccountNumber;
-            info.status = fa.Status;
+            info.status               = fa.Status;
             result.add(info);
         }
         return result;
@@ -156,7 +162,7 @@ public with sharing class TransferConfigurationController {
 
         String soql =
             'SELECT Id, ' + F_FROM + ', ' + F_TO + ', ' + F_AMT + ', ' +
-                            F_DATE  + ', ' + F_STAT + ', ' + F_TYPE +
+                            F_DATE  + ', ' + F_STAT +
             ' FROM '  + OBJ +
             ' WHERE ' + F_CASE + ' = :caseId' +
             ' ORDER BY CreatedDate ASC';
@@ -173,54 +179,35 @@ public with sharing class TransferConfigurationController {
         }
 
         Map<Id, FinancialAccount> faMap = new Map<Id, FinancialAccount>([
-            SELECT Id, Name, FinancialAccountNumber, Type
+            SELECT Id, Name, FinancialAccountNumber
             FROM FinancialAccount
             WHERE Id IN :faIds
         ]);
 
-        Map<Id, TransferLineInfo> sourceMap = new Map<Id, TransferLineInfo>();
-        Map<Id, TransferLineInfo> destMap   = new Map<Id, TransferLineInfo>();
-
+        List<TransferSummaryRow> rows = new List<TransferSummaryRow>();
         for (SObject r : records) {
             Id      fromId = (Id)      r.get(F_FROM);
             Id      toId   = (Id)      r.get(F_TO);
             Decimal amount = (Decimal) r.get(F_AMT);
 
-            if (fromId != null) {
-                if (!sourceMap.containsKey(fromId)) {
-                    FinancialAccount fa = faMap.get(fromId);
-                    TransferLineInfo line = new TransferLineInfo();
-                    line.recordId    = fromId;
-                    line.accountName = fa?.Name;
-                    line.accountNumber = fa?.FinancialAccountNumber;
-                    line.accountType = fa?.Type;
-                    line.amount = 0;
-                    sourceMap.put(fromId, line);
-                }
-                sourceMap.get(fromId).amount += amount;
-            }
+            FinancialAccount src = faMap.get(fromId);
+            FinancialAccount dst = faMap.get(toId);
 
-            if (toId != null) {
-                if (!destMap.containsKey(toId)) {
-                    FinancialAccount fa = faMap.get(toId);
-                    TransferLineInfo line = new TransferLineInfo();
-                    line.recordId    = toId;
-                    line.accountName = fa?.Name;
-                    line.accountNumber = fa?.FinancialAccountNumber;
-                    line.accountType = fa?.Type;
-                    line.amount = 0;
-                    destMap.put(toId, line);
-                }
-                destMap.get(toId).amount += amount;
-            }
+            TransferSummaryRow row = new TransferSummaryRow();
+            row.sourceId     = fromId;
+            row.sourceName   = src?.Name;
+            row.sourceNumber = src?.FinancialAccountNumber;
+            row.destId       = toId;
+            row.destName     = dst?.Name;
+            row.destNumber   = dst?.FinancialAccountNumber;
+            row.amount       = amount;
+            rows.add(row);
         }
 
         TransferSummary summary = new TransferSummary();
         summary.transferDate = (Date)   records[0].get(F_DATE);
         summary.status       = (String) records[0].get(F_STAT);
-        summary.transferType = (String) records[0].get(F_TYPE);
-        summary.sources      = sourceMap.values();
-        summary.destinations = destMap.values();
+        summary.rows         = rows;
         return summary;
     }
 
@@ -242,50 +229,39 @@ public with sharing class TransferConfigurationController {
         List<SObject> existing = Database.query(delSoql);
         if (!existing.isEmpty()) delete existing;
 
-        List<SObject> records = new List<SObject>();
+        if (ENFORCE_BALANCE_CHECK) {
+            Set<Id> sourceIds = new Set<Id>();
+            for (TransferRow row : p.rows) sourceIds.add((Id) row.fromId);
 
-        if (p.transferType == '1:1') {
-            records.add(buildRecord(objType, caseId, p.sourceRows[0].financialAccountId,
-                        p.destinationRows[0].financialAccountId, p.sourceRows[0].amount,
-                        startDate, p.status, p.transferType));
-
-        } else if (p.transferType == '1:N') {
-            for (TransferRow dest : p.destinationRows) {
-                records.add(buildRecord(objType, caseId, p.sourceRows[0].financialAccountId,
-                            dest.financialAccountId, dest.amount,
-                            startDate, p.status, p.transferType));
+            Map<Id, Decimal> latestBalance = new Map<Id, Decimal>();
+            for (FinancialAccountBalance bal : [
+                SELECT FinancialAccountId, Amount
+                FROM FinancialAccountBalance
+                WHERE FinancialAccountId IN :sourceIds
+                ORDER BY BalanceAsOfDate DESC, CreatedDate DESC
+            ]) {
+                if (!latestBalance.containsKey(bal.FinancialAccountId)) {
+                    latestBalance.put(bal.FinancialAccountId, bal.Amount);
+                }
             }
 
-        } else if (p.transferType == 'N:1') {
-            for (TransferRow src : p.sourceRows) {
-                records.add(buildRecord(objType, caseId, src.financialAccountId,
-                            p.destinationRows[0].financialAccountId, src.amount,
-                            startDate, p.status, p.transferType));
-            }
-
-        } else {
-            // N:N waterfall: walk two pointers through sources and destinations,
-            // pairing min(remaining source, remaining destination) at each step.
-            // Produces at most M+N-1 records; totals on both sides are preserved exactly.
-            List<Decimal> srcRem = new List<Decimal>();
-            List<Decimal> dstRem = new List<Decimal>();
-            for (TransferRow r : p.sourceRows) srcRem.add(r.amount);
-            for (TransferRow r : p.destinationRows) dstRem.add(r.amount);
-
-            Integer si = 0, di = 0;
-            while (si < p.sourceRows.size() && di < p.destinationRows.size()) {
-                Decimal pairAmt = srcRem[si] <= dstRem[di] ? srcRem[si] : dstRem[di];
-                records.add(buildRecord(objType, caseId,
-                            p.sourceRows[si].financialAccountId,
-                            p.destinationRows[di].financialAccountId,
-                            pairAmt, startDate, p.status, p.transferType));
-                srcRem[si] -= pairAmt;
-                dstRem[di] -= pairAmt;
-                if (srcRem[si] == 0) si++;
-                if (dstRem[di] == 0) di++;
+            for (TransferRow row : p.rows) {
+                Id      srcId   = (Id) row.fromId;
+                Decimal balance = latestBalance.get(srcId);
+                if (balance != null && row.amount > balance) {
+                    throw new AuraHandledException(
+                        'Insufficient balance on account ' + srcId +
+                        ': requested ' + row.amount + ', available ' + balance + '.'
+                    );
+                }
             }
         }
 
+        List<SObject> records = new List<SObject>();
+        for (TransferRow row : p.rows) {
+            records.add(buildRecord(objType, caseId, (Id) row.fromId, (Id) row.toId,
+                        row.amount, startDate, p.status, '1:1'));
+        }
         insert records;
     }
 

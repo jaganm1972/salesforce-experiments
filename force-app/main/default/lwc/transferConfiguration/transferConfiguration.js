@@ -11,25 +11,20 @@ import saveTransferRequests from '@salesforce/apex/TransferConfigurationControll
 import deleteTransferRequests from '@salesforce/apex/TransferConfigurationController.deleteTransferRequests';
 
 const CASE_FIELDS = [CASE_ACCOUNT_ID];
+const OTHER_VALUE = '__other__';
 
 export default class TransferConfiguration extends LightningElement {
     @api recordId;
     @api objectApiName;
 
     @track isFormMode = false;
-    @track sourceSelected = [];
-    @track destinationSelected = [];
+    @track transferRows = [];
     @track transferDate;
     @track isLoading = false;
     @track error;
 
-    @track destSearchTerm = '';
-    @track _destSearchRawResults = [];
-    isSearchingDest = false;
-
-    sourceComboboxValue = '';
     _keyCounter = 0;
-    _destSearchTimeout;
+    _searchTimeouts = {};
 
     @wire(getRecord, { recordId: '$recordId', fields: CASE_FIELDS })
     wiredCase;
@@ -51,18 +46,20 @@ export default class TransferConfiguration extends LightningElement {
         return this.recordId;
     }
 
+    get financialAccounts() {
+        return this.wiredFinancialAccounts?.data ?? [];
+    }
+
     get summary() {
         const raw = this.wiredSummary?.data;
         if (!raw) return null;
         return {
             ...raw,
-            sources: raw.sources.map((s) => ({
-                ...s,
-                displayLabel: `${s.accountType} • ****${s.accountNumber?.slice(-4)}`
-            })),
-            destinations: raw.destinations.map((d) => ({
-                ...d,
-                displayLabel: `${d.accountType} • ****${d.accountNumber?.slice(-4)}`
+            rows: raw.rows.map((r, i) => ({
+                ...r,
+                rowKey: i,
+                sourceLastFour: r.sourceNumber?.slice(-4) ?? '????',
+                destLastFour:   r.destNumber?.slice(-4)   ?? '????'
             }))
         };
     }
@@ -71,89 +68,68 @@ export default class TransferConfiguration extends LightningElement {
         return this.summary != null;
     }
 
-    get financialAccounts() {
-        return this.wiredFinancialAccounts?.data ?? [];
+    get hasTransferRows() {
+        return this.transferRows.length > 0;
     }
 
-    // Accounts not yet selected in either column, sorted by balance descending.
-    // Both comboboxes read from this single computed list.
-    get availableOptions() {
-        const selectedIds = new Set([
-            ...this.sourceSelected.map((r) => r.id),
-            ...this.destinationSelected.map((r) => r.id)
-        ]);
-        return this.financialAccounts
-            .filter((fa) => !selectedIds.has(fa.id))
-            .sort((a, b) => (b.balance ?? 0) - (a.balance ?? 0))
-            .map((fa) => ({ label: this._formatAccountLabel(fa), value: fa.id }));
-    }
+    // Builds per-row display objects with computed option lists and search results.
+    // Per-row constraints:
+    //   - Source dropdown excludes the row's own selected destination (owned accounts only).
+    //   - Destination dropdown excludes the row's own selected source.
+    //   - "Other" search results additionally exclude external accounts already locked
+    //     in as the destination in any other row, preventing duplicate external targets.
+    get displayRows() {
+        const allAccounts = this.financialAccounts;
 
-    // Search results with anything already selected on either side filtered out,
-    // so an account can't be picked twice or used as both a source and a destination.
-    get destSearchResults() {
-        const excludedIds = new Set([
-            ...this.sourceSelected.map((r) => r.id),
-            ...this.destinationSelected.map((r) => r.id)
-        ]);
-        return this._destSearchRawResults
-            .filter((fa) => !excludedIds.has(fa.id))
-            .map((fa) => ({
-                id: fa.id,
-                displayLabel: `${fa.name} • ****${fa.financialAccountNumber?.slice(-4) ?? '????'}`
-            }));
-    }
+        const lockedExternalIds = new Set(
+            this.transferRows
+                .filter(r => r.destIsExternal && r.destAccountId)
+                .map(r => r.destAccountId)
+        );
 
-    get hasDestSearchResults() {
-        return this.destSearchResults.length > 0;
-    }
+        return this.transferRows.map(row => {
+            const sourceOptions = allAccounts
+                .filter(fa => fa.id !== row.destAccountId)
+                .sort((a, b) => (b.balance ?? 0) - (a.balance ?? 0))
+                .map(fa => ({ label: this._formatAccountLabel(fa), value: fa.id }));
 
-    get hasSourceAccounts() {
-        return this.sourceSelected.length > 0;
-    }
+            const destOptions = [
+                ...allAccounts
+                    .filter(fa => fa.id !== row.sourceAccountId)
+                    .sort((a, b) => (b.balance ?? 0) - (a.balance ?? 0))
+                    .map(fa => ({ label: this._formatAccountLabel(fa), value: fa.id })),
+                { label: 'Other — search by account name or number', value: OTHER_VALUE }
+            ];
 
-    get hasDestinationAccounts() {
-        return this.destinationSelected.length > 0;
-    }
+            const destSearchResults = row._destSearchRawResults
+                .filter(fa => {
+                    if (fa.id === row.sourceAccountId) return false;
+                    if (lockedExternalIds.has(fa.id)) return false;
+                    return true;
+                })
+                .map(fa => ({
+                    id: fa.id,
+                    displayLabel: `${fa.name} • ****${fa.financialAccountNumber?.slice(-4) ?? '????'}`
+                }));
 
-    // Amount is only meaningfully entered on one side for 1:1, N:1 and 1:N —
-    // the other side's single account always carries the matching total, so we
-    // derive it instead of asking the user to re-key (and possibly mismatch) it.
-    // N:N is the only shape where both sides need independent amounts.
-    //
-    // The shape is ambiguous while either side is still empty (e.g. one source
-    // and zero destinations could become 1:1 or 1:N), so both sides stay
-    // editable until there's at least one account on each — only then do we
-    // know which side's total to derive.
-    get _shapeIsResolved() {
-        return this.sourceSelected.length > 0 && this.destinationSelected.length > 0;
-    }
+            // showDestCombo: show the dropdown unless an external account is locked in
+            const showDestCombo = !(row.destIsExternal && row.destAccountId);
+            const showDestSearch = row.destIsExternal && !row.destAccountId;
+            const showDestExternalChip = row.destIsExternal && !!row.destAccountId;
+            const destComboValue = row.destIsExternal ? OTHER_VALUE : (row.destAccountId ?? '');
 
-    get sourceAmountEditable() {
-        if (!this._shapeIsResolved) return true;
-        return !(this.sourceSelected.length === 1 && this.destinationSelected.length > 1);
-    }
-
-    get destinationAmountEditable() {
-        if (!this._shapeIsResolved) return true;
-        return this.destinationSelected.length > 1;
-    }
-
-    get sourceTotal() {
-        if (!this.sourceAmountEditable) {
-            return this.destinationTotal;
-        }
-        return this.sourceSelected.reduce((sum, r) => sum + this._parseAmount(r.amount), 0);
-    }
-
-    get destinationTotal() {
-        if (!this.destinationAmountEditable) {
-            return this.sourceTotal;
-        }
-        return this.destinationSelected.reduce((sum, r) => sum + this._parseAmount(r.amount), 0);
-    }
-
-    get hasTotalMismatch() {
-        return this.sourceTotal > 0 && this.destinationTotal > 0 && this.sourceTotal !== this.destinationTotal;
+            return {
+                ...row,
+                sourceOptions,
+                destOptions,
+                destSearchResults,
+                hasDestSearchResults: destSearchResults.length > 0,
+                showDestCombo,
+                showDestSearch,
+                showDestExternalChip,
+                destComboValue
+            };
+        });
     }
 
     // --- List mode handlers ---
@@ -165,28 +141,18 @@ export default class TransferConfiguration extends LightningElement {
     handleEdit() {
         if (this.summary) {
             this.transferDate = this.summary.transferDate;
-
-            this.sourceSelected = this.summary.sources.map((s) => {
-                const fa = this.financialAccounts.find((a) => a.id === s.recordId);
+            this.transferRows = this.summary.rows.map(r => {
+                const isOwned = this.financialAccounts.some(fa => fa.id === r.destId);
                 return {
                     _key: ++this._keyCounter,
-                    id: s.recordId,
-                    name: s.accountName,
-                    lastFour: s.accountNumber?.slice(-4) ?? '????',
-                    balance: fa?.balance ?? null,
-                    amount: s.amount
-                };
-            });
-
-            this.destinationSelected = this.summary.destinations.map((d) => {
-                const fa = this.financialAccounts.find((a) => a.id === d.recordId);
-                return {
-                    _key: ++this._keyCounter,
-                    id: d.recordId,
-                    name: d.accountName,
-                    lastFour: d.accountNumber?.slice(-4) ?? '????',
-                    balance: fa?.balance ?? null,
-                    amount: d.amount
+                    sourceAccountId:     r.sourceId,
+                    destAccountId:       r.destId,
+                    destIsExternal:      !isOwned,
+                    destExternalName:    !isOwned ? r.destName   : null,
+                    destExternalLastFour:!isOwned ? r.destNumber?.slice(-4) ?? '????' : null,
+                    amount:              r.amount,
+                    destSearchTerm:      '',
+                    _destSearchRawResults: []
                 };
             });
         }
@@ -215,76 +181,96 @@ export default class TransferConfiguration extends LightningElement {
         }
     }
 
-    // --- Form mode: account selection ---
+    // --- Form mode handlers ---
 
-    handleAddSource(event) {
-        const id = event.detail.value;
-        if (!id) return;
-        const fa = this.financialAccounts.find((a) => a.id === id);
-        if (!fa) return;
-        this.sourceSelected = [...this.sourceSelected, this._makeRow(fa)];
-        this.sourceComboboxValue = '';
+    handleAddRow() {
+        this.transferRows = [...this.transferRows, {
+            _key:                 ++this._keyCounter,
+            sourceAccountId:      null,
+            destAccountId:        null,
+            destIsExternal:       false,
+            destExternalName:     null,
+            destExternalLastFour: null,
+            amount:               null,
+            destSearchTerm:       '',
+            _destSearchRawResults: []
+        }];
+    }
+
+    handleRemoveRow(event) {
+        const key = Number(event.currentTarget.dataset.key);
+        this.transferRows = this.transferRows.filter(r => r._key !== key);
+    }
+
+    handleSourceChange(event) {
+        const key = Number(event.target.dataset.key);
+        this._updateRow(key, { sourceAccountId: event.detail.value || null });
+    }
+
+    handleDestChange(event) {
+        const key = Number(event.target.dataset.key);
+        const value = event.detail.value;
+        if (value === OTHER_VALUE) {
+            this._updateRow(key, {
+                destIsExternal:        true,
+                destAccountId:         null,
+                destExternalName:      null,
+                destExternalLastFour:  null,
+                destSearchTerm:        '',
+                _destSearchRawResults: []
+            });
+        } else {
+            this._updateRow(key, {
+                destAccountId:         value || null,
+                destIsExternal:        false,
+                destExternalName:      null,
+                destExternalLastFour:  null,
+                destSearchTerm:        '',
+                _destSearchRawResults: []
+            });
+        }
+    }
+
+    handleClearExternalDest(event) {
+        const key = Number(event.currentTarget.dataset.key);
+        this._updateRow(key, {
+            destIsExternal:        false,
+            destAccountId:         null,
+            destExternalName:      null,
+            destExternalLastFour:  null,
+            destSearchTerm:        '',
+            _destSearchRawResults: []
+        });
     }
 
     handleDestSearchTermChange(event) {
-        this.destSearchTerm = event.detail.value;
-        window.clearTimeout(this._destSearchTimeout);
-        this._destSearchTimeout = window.setTimeout(() => this._runDestSearch(), 300);
+        const key = Number(event.target.dataset.key);
+        const term = event.detail.value;
+        this._updateRow(key, { destSearchTerm: term });
+        window.clearTimeout(this._searchTimeouts[key]);
+        this._searchTimeouts[key] = window.setTimeout(() => this._runDestSearch(key, term), 300);
     }
 
     handleSelectDestSearchResult(event) {
-        const id = event.currentTarget.dataset.id;
-        const fa = this._destSearchRawResults.find((r) => r.id === id);
+        const key = Number(event.currentTarget.dataset.key);
+        const id  = event.currentTarget.dataset.id;
+        const row = this.transferRows.find(r => r._key === key);
+        if (!row) return;
+        const fa = row._destSearchRawResults.find(r => r.id === id);
         if (!fa) return;
-        this.destinationSelected = [...this.destinationSelected, this._makeRow(fa)];
-        this.destSearchTerm = '';
-        this._destSearchRawResults = [];
-    }
-
-    _runDestSearch() {
-        const term = this.destSearchTerm?.trim();
-        if (!term || term.length < 4) {
-            this._destSearchRawResults = [];
-            return;
-        }
-
-        this.isSearchingDest = true;
-        searchFinancialAccounts({ searchTerm: term })
-            .then((results) => {
-                this._destSearchRawResults = results;
-            })
-            .catch((e) => {
-                this.error = this._extractError(e);
-            })
-            .finally(() => {
-                this.isSearchingDest = false;
-            });
+        this._updateRow(key, {
+            destAccountId:         fa.id,
+            destIsExternal:        true,
+            destExternalName:      fa.name,
+            destExternalLastFour:  fa.financialAccountNumber?.slice(-4) ?? '????',
+            destSearchTerm:        '',
+            _destSearchRawResults: []
+        });
     }
 
     handleAmountChange(event) {
         const key = Number(event.target.dataset.key);
-        const side = event.target.dataset.side;
-        const value = event.detail.value;
-        if (side === 'source') {
-            this.sourceSelected = this.sourceSelected.map((r) =>
-                r._key === key ? { ...r, amount: value } : r
-            );
-        } else {
-            this.destinationSelected = this.destinationSelected.map((r) =>
-                r._key === key ? { ...r, amount: value } : r
-            );
-        }
-    }
-
-    handleRemoveAccount(event) {
-        const key = Number(event.target.dataset.key);
-        const side = event.target.dataset.side;
-        if (side === 'source') {
-            this.sourceSelected = this.sourceSelected.filter((r) => r._key !== key);
-        } else {
-            this.destinationSelected = this.destinationSelected.filter((r) => r._key !== key);
-        }
-        // availableOptions is derived, so the account automatically reappears in both dropdowns
+        this._updateRow(key, { amount: event.detail.value });
     }
 
     handleTransferDateChange(event) {
@@ -306,41 +292,39 @@ export default class TransferConfiguration extends LightningElement {
 
     // --- Private ---
 
-    _makeRow(fa) {
-        return {
-            _key: ++this._keyCounter,
-            id: fa.id,
-            name: fa.name,
-            lastFour: fa.financialAccountNumber?.slice(-4) ?? '????',
-            balance: fa.balance,
-            amount: null
-        };
+    _updateRow(key, updates) {
+        this.transferRows = this.transferRows.map(r =>
+            r._key === key ? { ...r, ...updates } : r
+        );
+    }
+
+    _runDestSearch(key, term) {
+        const trimmed = term?.trim();
+        if (!trimmed || trimmed.length < 4) {
+            this._updateRow(key, { _destSearchRawResults: [] });
+            return;
+        }
+        searchFinancialAccounts({ searchTerm: trimmed })
+            .then(results => {
+                // Guard against a stale response arriving after the user changed the term.
+                const row = this.transferRows.find(r => r._key === key);
+                if (row && row.destSearchTerm === term) {
+                    this._updateRow(key, { _destSearchRawResults: results });
+                }
+            })
+            .catch(e => { this.error = this._extractError(e); });
     }
 
     _formatAccountLabel(fa) {
-        const bal =
-            fa.balance != null
-                ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(fa.balance)
-                : 'No balance';
+        const bal = fa.balance != null
+            ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(fa.balance)
+            : 'No balance';
         return `${fa.name} — ${bal}`;
     }
 
-    _inferTransferType() {
-        const s = this.sourceSelected.length;
-        const d = this.destinationSelected.length;
-        if (s === 1 && d === 1) return '1:1';
-        if (s === 1) return '1:N';
-        if (d === 1) return 'N:1';
-        return 'N:N';
-    }
-
     _resetForm() {
-        this.sourceSelected = [];
-        this.destinationSelected = [];
+        this.transferRows = [];
         this.transferDate = null;
-        this.sourceComboboxValue = '';
-        this.destSearchTerm = '';
-        this._destSearchRawResults = [];
         this.error = null;
     }
 
@@ -357,28 +341,21 @@ export default class TransferConfiguration extends LightningElement {
         try {
             await saveTransferRequests({
                 payloadJson: JSON.stringify({
-                    caseId: this.recordId,
-                    transferType: this._inferTransferType(),
+                    caseId:    this.recordId,
                     startDate: this.transferDate,
                     status,
-                    sourceRows: this.sourceSelected.map((r) => ({
-                        financialAccountId: r.id,
-                        amount: this._effectiveSourceAmount(r)
-                    })),
-                    destinationRows: this.destinationSelected.map((r) => ({
-                        financialAccountId: r.id,
-                        amount: this._effectiveDestinationAmount(r)
+                    rows: this.transferRows.map(r => ({
+                        fromId: r.sourceAccountId,
+                        toId:   r.destAccountId,
+                        amount: this._parseAmount(r.amount)
                     }))
                 })
             });
-
-            this.dispatchEvent(
-                new ShowToastEvent({
-                    title: 'Success',
-                    message: isSubmit ? 'Transfer submitted successfully.' : 'Draft saved successfully.',
-                    variant: 'success'
-                })
-            );
+            this.dispatchEvent(new ShowToastEvent({
+                title:   'Success',
+                message: isSubmit ? 'Transfer submitted successfully.' : 'Draft saved successfully.',
+                variant: 'success'
+            }));
             this._resetForm();
             this.isFormMode = false;
             await refreshApex(this.wiredSummary);
@@ -394,28 +371,12 @@ export default class TransferConfiguration extends LightningElement {
         return isFinite(n) ? n : 0;
     }
 
-    // The non-editable side has exactly one row, whose amount is the matching total.
-    _effectiveSourceAmount(row) {
-        return this.sourceAmountEditable ? this._parseAmount(row.amount) : this.sourceTotal;
-    }
-
-    _effectiveDestinationAmount(row) {
-        return this.destinationAmountEditable ? this._parseAmount(row.amount) : this.destinationTotal;
-    }
-
     _extractError(e) {
         console.error('TransferConfiguration error:', JSON.stringify(e));
         const dmlErrors = e?.body?.output?.errors;
-        if (dmlErrors?.length) {
-            return dmlErrors.map((err) => err.message).join(' ');
-        }
+        if (dmlErrors?.length) return dmlErrors.map(err => err.message).join(' ');
         const fieldErrors = e?.body?.output?.fieldErrors;
-        if (fieldErrors) {
-            return Object.values(fieldErrors)
-                .flat()
-                .map((err) => err.message)
-                .join(' ');
-        }
+        if (fieldErrors) return Object.values(fieldErrors).flat().map(err => err.message).join(' ');
         return e?.body?.message ?? e?.message ?? 'An unexpected error occurred.';
     }
 
@@ -424,44 +385,28 @@ export default class TransferConfiguration extends LightningElement {
             this.error = 'Transfer date is required.';
             return false;
         }
-
-        if (this.sourceSelected.length === 0) {
-            this.error = 'At least one source account is required.';
+        if (this.transferRows.length === 0) {
+            this.error = 'At least one transfer row is required.';
             return false;
         }
-
-        if (this.destinationSelected.length === 0) {
-            this.error = 'At least one destination account is required.';
-            return false;
-        }
-
-        const sourceIncomplete = this.sourceAmountEditable
-            ? this.sourceSelected.some((r) => this._parseAmount(r.amount) <= 0)
-            : this.sourceTotal <= 0;
-        const destinationIncomplete = this.destinationAmountEditable
-            ? this.destinationSelected.some((r) => this._parseAmount(r.amount) <= 0)
-            : this.destinationTotal <= 0;
-        if (sourceIncomplete || destinationIncomplete) {
-            this.error = 'All amount fields must be greater than zero.';
-            return false;
-        }
-
-        if (isSubmit) {
-            for (const row of this.sourceSelected) {
-                const requested = this._effectiveSourceAmount(row);
-                if (row.balance != null && requested > row.balance) {
-                    const fmt = (n) =>
-                        new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-                    this.error = `Account ****${row.lastFour} has ${fmt(row.balance)} available but ${fmt(requested)} requested.`;
-                    return false;
-                }
+        for (const row of this.transferRows) {
+            if (!row.sourceAccountId) {
+                this.error = 'All rows must have a source account selected.';
+                return false;
             }
-            if (this.hasTotalMismatch) {
-                this.error = 'Source and destination totals must match before submitting.';
+            if (!row.destAccountId) {
+                this.error = 'All rows must have a destination account selected.';
+                return false;
+            }
+            if (row.sourceAccountId === row.destAccountId) {
+                this.error = 'Source and destination cannot be the same account.';
+                return false;
+            }
+            if (this._parseAmount(row.amount) <= 0) {
+                this.error = 'All rows must have an amount greater than zero.';
                 return false;
             }
         }
-
         this.error = null;
         return true;
     }
